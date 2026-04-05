@@ -1,0 +1,72 @@
+# Confidential — Write-up
+
+**Catégorie** : Forensics | **Plateforme** : TryHackMe | **Difficulté** : Easy | **Date** : avril 2026
+
+---
+
+## Contexte
+
+Un PDF contient un QR code recouvert par une image. Objectif : récupérer le contenu du QR code.
+
+---
+
+## Raisonnement initial
+
+Pas d'expérience préalable sur la forensique PDF. Le point de départ : un PDF est un format à couches. Une image qui "couvre" un autre élément ne l'efface pas — elle le masque visuellement. Le QR code est toujours présent dans le fichier, juste empilé sous l'image de couverture.
+
+Approche : extraire tous les objets image du PDF séparément.
+
+---
+
+## Extraction des images
+
+```bash
+file Repdf.pdf
+# Repdf.pdf: PDF document, version 1.5
+
+pdfimages -all Repdf.pdf output
+ls -la
+```
+
+`pdfimages` extrait chaque image embarquée comme objet distinct. Résultat : deux fichiers — l'image de couverture et le QR code en dessous.
+
+---
+
+## Décodage du QR code
+
+Première tentative :
+
+```bash
+zbarimg output-000.png
+# zbarimg: command not found
+```
+
+`zbar-tools` absent sur la VM. Installation impossible — machine isolée sans accès réseau.
+
+Contournement : screenshot du fichier image extrait, décodage via [webqr.com](https://webqr.com) depuis le navigateur de la VM.
+
+---
+
+## Flag
+
+**`flag{e08e6ce2f077a1b420cfd4a5d1a57a8d}`**
+
+---
+
+## Ce que j'ai appris
+
+Un PDF ne détruit pas les éléments qu'il recouvre — il les empile. `pdfimages` suffit pour désassembler le fichier couche par couche.
+
+Le vrai blocage était le décodage : `zbarimg` absent, `pyzbar` non installable sans réseau. En conditions réelles, avoir ces outils disponibles offline est essentiel. Alternative robuste à retenir pour la prochaine fois :
+
+```bash
+pip3 install pyzbar --break-system-packages
+python3 -c "
+from PIL import Image
+from pyzbar.pyzbar import decode
+img = Image.open('output-000.png')
+print(decode(img))
+"
+```
+
+Ou embarquer `zbar-tools` dans un environnement forensique portable.

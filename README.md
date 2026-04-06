@@ -3,3 +3,4 @@ Forensic &amp; incident response write-ups. The flag matters less than the inves
  - Infinity Shell (TryHackMe)
  - Hide and seek (TryHackMe)
  - Confidential (TryHackMe)
+ - Monday Monitor (TryHackMe)

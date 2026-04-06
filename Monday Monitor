@@ -142,4 +142,4 @@ full_log: *password*
 full_log: *net user*
 ```
 
-Quand une requête multi-champs retourne une erreur OpenSearch, simplifier vers `full_log: *terme*` — moins précis mais toujours fonctionnel.
+Quand une requête multi-champs retourne une erreur OpenSearch, simplifier vers `full_log: *terme*` — moins précis mais toujours fonctionnel. Besoin de davantage de pratique avec Wazuh, je suis plus à l'aise avec Splunk que je maitrise davantage. 
